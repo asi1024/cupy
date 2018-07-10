@@ -770,9 +770,7 @@ class Fusion(object):
         return self._memo[key]
 
     def _compile(self, *args, **kwargs):
-        if builtins.any(
-                not isinstance(_, (core.ndarray, numpy.ndarray, numpy.generic))
-                for _ in args):
+        if builtins.any(not hasattr(_, 'dtype') for _ in args):
             raise TypeError('Invalid argument type for \'{}\': ({})'.format(
                 self.name,
                 ', '.join(repr(type(_)) for _ in args)))
