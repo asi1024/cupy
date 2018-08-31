@@ -1590,7 +1590,7 @@ class TestFusionThread(unittest.TestCase):
         t.join()
         assert (out[0] == f(x, y)).all()
 
-    @testing.numpy_cupy_array_equal()
+    @testing.numpy_cupy_array_list_equal()
     def test_thread_multiple_dtypes(self, xp):
         x1 = testing.shaped_arange((3, 3), xp, xp.int64)
         y1 = testing.shaped_arange((3, 3), xp, xp.int64)
@@ -1625,4 +1625,4 @@ class TestFusionThread(unittest.TestCase):
         for tid in six.moves.range(50, 100):
             threads[tid].join()
 
-        return xp.concatenate(out)
+        return out
