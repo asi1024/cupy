@@ -40,8 +40,9 @@ cdef dict _dtype_to_ctype = {
 
 cdef list _dtype_list = [numpy.dtype(_) for _ in '?bhilqBHILQefdFD']
 
-cdef tuple _acceptable_types = six.integer_types + (
-    core.ndarray, numpy.ndarray, numpy.generic, float, complex, bool)
+cdef tuple _constant_types = six.integer_types + (float, complex, bool)
+cdef tuple _parameter_types = (core.ndarray, numpy.ndarray, numpy.generic)
+cdef tuple _acceptable_types = _constant_types + _parameter_types
 
 
 cpdef inline _is_fusing():
@@ -713,7 +714,7 @@ class _FusionHistory(object):
             operation=operation)
         return module_code
 
-    def get_fusion(self, func, in_params_info, name):
+    def get_fusion(self, func, params_info, name):
         """This generates CUDA kernel from the given function and dtypes.
 
         This function generates ElementwiseKernel or ReductioKernel from the
@@ -728,15 +729,23 @@ class _FusionHistory(object):
             The second element of return values is kwargs that will give into
             the elementwise kernel or reduction kernel.
         """
-        in_dtypes = [t for t, d in in_params_info]
-        in_ndims = [d for t, d in in_params_info]
-        self.ndim = max(in_ndims)
-        in_params = [self._fresh_premap_param(t) for t in in_dtypes]
-        in_pvars = [_FusionVarScalar(v, d, False)
-                    if d == -1
-                    else _FusionVarArray(v, d, False)
-                    for v, d in zip(in_params, in_ndims)]
-        return_value = func(*in_pvars)
+        in_params = []
+        function_args = []
+        self.ndim = 0
+        for param in params_info:
+            if isinstance(param, ParamsInfo):
+                cuda_var = self._fresh_premap_param(param.dtype)
+                if param.ndim == -1:
+                    python_var = _FusionVarScalar(cuda_var, param.ndim, False)
+                else:
+                    python_var = _FusionVarArray(cuda_var, param.ndim, False)
+                in_params.append(cuda_var)
+                function_args.append(python_var)
+                self.ndim = max(self.ndim, param.ndim)
+            else:
+                function_args.append(param)
+
+        return_value = func(*function_args)
 
         if isinstance(return_value, tuple):
             return_tuple = True
@@ -820,6 +829,15 @@ class _FusionHistory(object):
             return kernel, self.reduce_kwargs
 
 
+cdef class ParamsInfo:
+    cdef:
+        readonly object dtype
+        readonly int ndim
+
+    def __init__(self, object obj):
+        self.dtype, self.ndim = _get_param_info(obj)
+
+
 cdef inline tuple _get_param_info(arg):
     if isinstance(arg, core.ndarray):
         return (arg.dtype, arg.ndim)
@@ -840,16 +858,19 @@ class Fusion(object):
         name (str): The name of the function.
     """
 
-    def __init__(self, func, name=None):
+    def __init__(self, func, name=None, embedded_indices=None):
         self.func = func
         self.name = name or func.__name__
         self._memo = {}
+        self._memo_with_embedded_args = {}
+
+        if embedded_indices is None:
+            embedded_indices = []
+        self._embedded_indices = list(embedded_indices)
+        self._embedded_args = None
 
     def __repr__(self):
         return '<Fusion \'{}\'>'.format(self.name)
-
-    def _is_cupy_data(self, a):
-        return isinstance(a, (core.ndarray, numpy.generic))
 
     def __call__(self, *args):
         # Inner function of composition of multiple fused functions.
@@ -867,21 +888,57 @@ class Fusion(object):
                 arg_types = ', '.join(repr(type(a)) for a in args)
                 raise TypeError(mes.format(self.name, arg_types))
 
-        # Cache the result of execution path analysis
-        cdef tuple params_info = tuple([_get_param_info(arg) for arg in args])
+        # Check embedded indices
+        cdef int i
+        cdef bint embedded_args_mode = True
+        cdef list embedded_indices = self._embedded_indices
+        if embedded_indices != []:
+            embedded_args = self._embedded_args
+            if embedded_args is None:
+                embedded_args = [args[i] for i in embedded_indices]
+                self._embedded_args = embedded_args
+            for i in range(len(embedded_indices)):
+                constant_arg = args[embedded_indices[i]]
+                if not isinstance(constant_arg, _constant_types):
+                    raise TypeError(
+                        'Value of type {} cannot be embedded.'.format(
+                            type(constant_arg)))
+                if embedded_args[i] != constant_arg:
+                    embedded_args_mode = False
+                    break
+        else:
+            embedded_args_mode = False
 
-        if params_info not in self._memo:
+        cdef list params
+        cdef dict memo
+        if embedded_args_mode:
+            params = [args[i] for i in range(len(args))
+                      if i not in embedded_indices]
+            memo = self._memo_with_embedded_args
+        else:
+            params = list(args)
+            memo = self._memo
+
+        # Cache the result of execution path analysis
+        cdef tuple key = tuple([_get_param_info(p) for p in params])
+
+        if key not in memo:
             try:
                 _thread_local.history = _FusionHistory()
-                self._memo[params_info] = _thread_local.history.get_fusion(
-                    self.func, params_info, self.name)
+                args_info = [args[i]
+                             if embedded_args_mode and i in embedded_indices
+                             else ParamsInfo(args[i])
+                             for i in range(len(args))]
+                memo[key] = _thread_local.history.get_fusion(
+                    self.func, args_info, self.name)
             finally:
                 del _thread_local.history
-        kernel, kwargs = self._memo[params_info]
-        return kernel(*args, **kwargs)
+        kernel, kwargs = memo[key]
+        return kernel(*params, **kwargs)
 
     def clear_cache(self):
         self._memo = {}
+        self._memo_with_embedded_args = {}
 
 
 def fuse(*args, **kwargs):
@@ -902,8 +959,8 @@ def fuse(*args, **kwargs):
 
     """
 
-    def wrapper(f, kernel_name=None):
-        return Fusion(f, kernel_name)
+    def wrapper(f, kernel_name=None, embedded_indices=None):
+        return Fusion(f, kernel_name, embedded_indices)
 
     if len(args) == 1 and len(kwargs) == 0 and callable(args[0]):
         return functools.update_wrapper(wrapper(args[0]), args[0])
