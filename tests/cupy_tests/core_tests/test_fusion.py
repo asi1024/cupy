@@ -1766,3 +1766,28 @@ class TestBroadcast(unittest.TestCase):
         x = testing.shaped_arange((3, 4), xp, xp.int64)
         y = testing.shaped_arange((2, 3, 4), xp, xp.int64)
         return f(x, y)
+
+
+@testing.gpu
+class TestFusionEmbeddedArgs(unittest.TestCase):
+
+    @testing.numpy_cupy_array_equal()
+    def test_embedded_args(self, xp):
+
+        @cupy.fuse(embedded_indices=(2,))
+        def f(x, y, z):
+            return x + y + z
+
+        x = testing.shaped_arange((3, 4), xp, xp.int64)
+        return f(x, x, 1) + f(x, x, 1) + f(x, x, 2) + f(x, x, 2) + \
+            f(x, x, 3) + f(x, x, 3) + f(x, 1, 1) + f(x, 1, 1)
+
+    @testing.numpy_cupy_array_equal()
+    def test_embedded_multiple_args(self, xp):
+
+        @cupy.fuse(embedded_indices=(0, 2))
+        def f(x, y, z):
+            return x + y + z
+
+        x = testing.shaped_arange((3, 4), xp, xp.int64)
+        return f(0, x, 1) + f(0, x, 1) + f(0, x, 0) + f(1, x, 0)
