@@ -4,11 +4,16 @@ import string
 import warnings
 
 import numpy
+from libcpp cimport vector
 
 import cupy
 from cupy.core._dtype import get_dtype
 from cupy.core import _kernel
 from cupy.core import core
+
+
+cdef extern from "<algorithm>" namespace "std":
+    Iter find[Iter, T](Iter first, Iter last, const T& v)
 
 
 _thread_local = _kernel._thread_local
@@ -733,7 +738,7 @@ class _FusionHistory(object):
         function_args = []
         self.ndim = 0
         for param in params_info:
-            if isinstance(param, ParamsInfo):
+            if isinstance(param, _ParamsInfo):
                 cuda_var = self._fresh_premap_param(param.dtype)
                 if param.ndim == -1:
                     python_var = _FusionVarScalar(cuda_var, param.ndim, False)
@@ -829,21 +834,31 @@ class _FusionHistory(object):
             return kernel, self.reduce_kwargs
 
 
-cdef class ParamsInfo:
+cdef class _ParamsInfo:
     cdef:
         readonly object dtype
         readonly int ndim
 
     def __init__(self, object obj):
-        self.dtype, self.ndim = _get_param_info(obj)
+        dtype, ndim = _get_param_info(obj)
+        self.dtype = numpy.dtype(dtype)
+        self.ndim = ndim
 
 
 cdef inline tuple _get_param_info(arg):
     if isinstance(arg, core.ndarray):
-        return (arg.dtype, arg.ndim)
-    elif isinstance(arg, numpy.generic):
-        return (arg.dtype, -1)
-    return (numpy.dtype(type(arg)), -1)
+        return arg.dtype, arg.ndim
+    if isinstance(arg, numpy.generic):
+        return arg.dtype, -1
+    if isinstance(arg, float):
+        return 'd', -1
+    if isinstance(arg, int):
+        return 'l', -1
+    if isinstance(arg, bool):
+        return '?', -1
+    if isinstance(arg, complex):
+        return 'D', -1
+    raise Exception('Never reach this line')
 
 
 class Fusion(object):
@@ -864,9 +879,7 @@ class Fusion(object):
         self._memo = {}
         self._memo_with_embedded_args = {}
 
-        if embedded_indices is None:
-            embedded_indices = []
-        self._embedded_indices = list(embedded_indices)
+        self._embedded_indices = embedded_indices
         self._embedded_args = None
 
     def __repr__(self):
@@ -878,7 +891,12 @@ class Fusion(object):
             return self.func(*args)
 
         # No cupy ndarray exists in the arguments
-        if cupy.get_array_module(*args) is not cupy:
+        cdef bint no_cupy_ndarray = True
+        for arg in args:
+            if isinstance(arg, core.ndarray):
+                no_cupy_ndarray = False
+                break
+        if no_cupy_ndarray:
             return self.func(*args)
 
         # Invalid argument types
@@ -889,16 +907,19 @@ class Fusion(object):
                 raise TypeError(mes.format(self.name, arg_types))
 
         # Check embedded indices
-        cdef int i
+        cdef Py_ssize_t i
         cdef bint embedded_args_mode = True
-        cdef list embedded_indices = self._embedded_indices
-        if embedded_indices != []:
+        cdef vector.vector[Py_ssize_t] embedded_indices
+        cdef Py_ssize_t index
+        if self._embedded_indices is not None:
+            embedded_indices = self._embedded_indices
             embedded_args = self._embedded_args
             if embedded_args is None:
                 embedded_args = [args[i] for i in embedded_indices]
                 self._embedded_args = embedded_args
-            for i in range(len(embedded_indices)):
-                constant_arg = args[embedded_indices[i]]
+            for i in range(int(embedded_indices.size())):
+                index = embedded_indices[i]
+                constant_arg = args[index]
                 if not isinstance(constant_arg, _constant_types):
                     raise TypeError(
                         'Value of type {} cannot be embedded.'.format(
@@ -909,14 +930,17 @@ class Fusion(object):
         else:
             embedded_args_mode = False
 
-        cdef list params
+        cdef tuple params
         cdef dict memo
         if embedded_args_mode:
-            params = [args[i] for i in range(len(args))
-                      if i not in embedded_indices]
+            params = tuple([
+                args[i] for i in range(len(args))
+                if find(embedded_indices.begin(),
+                        embedded_indices.end(), i) == \
+                embedded_indices.end()])
             memo = self._memo_with_embedded_args
         else:
-            params = list(args)
+            params = args
             memo = self._memo
 
         # Cache the result of execution path analysis
@@ -926,8 +950,11 @@ class Fusion(object):
             try:
                 _thread_local.history = _FusionHistory()
                 args_info = [args[i]
-                             if embedded_args_mode and i in embedded_indices
-                             else ParamsInfo(args[i])
+                             if embedded_args_mode and find(
+                                     embedded_indices.begin(),
+                                     embedded_indices.end(), i) != \
+                             embedded_indices.end()
+                             else _ParamsInfo(args[i])
                              for i in range(len(args))]
                 memo[key] = _thread_local.history.get_fusion(
                     self.func, args_info, self.name)
