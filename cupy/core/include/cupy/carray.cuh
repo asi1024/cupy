@@ -56,11 +56,8 @@ public:
 
   __device__ operator float() const {return float(data_);}
 
-#if __CUDACC_VER_MAJOR__ >= 9
+  // TODO: checks if cuda >= 9
   __device__ const half& data() const {return data_;}
-#else
-  __device__ const float16& data() const {return *this;}
-#endif
 
   static const unsigned short nan = 0x7e00u;
 
