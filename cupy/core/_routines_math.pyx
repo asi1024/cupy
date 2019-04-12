@@ -282,9 +282,15 @@ cdef create_arithmetic(name, op, boolop, doc):
         doc=doc)
 
 
-_add = create_arithmetic(
-    'add', '+', '|',
-    '''Adds two arrays elementwise.
+_add = create_ufunc(
+    'cupy_add',
+    (('??->?', 'out0 = in0 | in1'),
+     'bb->b', 'BB->B', 'hh->h', 'HH->H', 'ii->i', 'II->I',
+     'll->l', 'LL->L', 'qq->q', 'QQ->Q',
+     ('ee->e', 'out0 = float16(__hadd(in0.data(), in1.data()))'),
+     'ff->f', 'dd->d', 'FF->F', 'DD->D'),
+    'out0 = in0 + in1',
+    doc='''Adds two arrays elementwise.
 
     .. seealso:: :data:`numpy.add`
 
