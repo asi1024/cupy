@@ -157,6 +157,15 @@ cdef Py_ssize_t _get_contiguous_size(
     return contiguous_size
 
 
+cdef Py_ssize_t _block_stride = -1
+
+
+def set_block_stride(new_block_stride):
+    global _block_stride
+    assert isinstance(new_block_stride, int)
+    _block_stride = new_block_stride
+
+
 cpdef (Py_ssize_t, Py_ssize_t, Py_ssize_t) _get_block_specs(  # NOQA
         Py_ssize_t in_size, Py_ssize_t out_size,
         Py_ssize_t contiguous_size) except*:
@@ -164,9 +173,12 @@ cpdef (Py_ssize_t, Py_ssize_t, Py_ssize_t) _get_block_specs(  # NOQA
 
     reduce_block_size = max(1, in_size // out_size)
     contiguous_size = min(contiguous_size, 32)
-    block_stride = max(contiguous_size, _block_size // reduce_block_size)
-    block_stride = min(block_stride, (out_size + 31) // 32)
-    block_stride = internal.clp2(block_stride // 2 + 1)  # floor
+    if _block_stride <= 0:
+        block_stride = max(contiguous_size, _block_size // reduce_block_size)
+        block_stride = min(block_stride, (out_size + 255) // 256)
+        block_stride = internal.clp2(block_stride // 2 + 1)  # floor
+    else:
+        block_stride = _block_stride
     out_block_num = (out_size + block_stride - 1) // block_stride
 
     return _block_size, block_stride, out_block_num
