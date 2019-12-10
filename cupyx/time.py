@@ -1,3 +1,4 @@
+import contextlib
 import time
 
 import numpy
@@ -63,3 +64,25 @@ def run(name, func, args=(), n=10000, *, n_warmup=10):
         ts[1, i] = gpu_time
 
     return _PerfCaseResult(name, ts)
+
+
+@contextlib.contextmanager
+def measure(name, show_gpu=False):
+    ev1 = cupy.cuda.stream.Event()
+    ev2 = cupy.cuda.stream.Event()
+
+    try:
+        ev1.synchronize()
+        ev1.record()
+        t1 = time.perf_counter()
+        yield
+
+    finally:
+        t2 = time.perf_counter()
+        ev2.record()
+        ev2.synchronize()
+        cpu_time = t2 - t1
+        gpu_time = cupy.cuda.get_elapsed_time(ev1, ev2) * 1e-3
+        ts = numpy.array([[cpu_time], [gpu_time]])
+        perf = _PerfCaseResult(name, ts)
+        print(perf.to_str(show_gpu=show_gpu))

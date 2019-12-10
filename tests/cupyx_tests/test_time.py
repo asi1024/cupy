@@ -28,6 +28,26 @@ class TestRun(unittest.TestCase):
                 assert (perf.gpu_times == 2.5).all()
 
 
+class TestMeasure(unittest.TestCase):
+
+    def test_show_gpu(self):
+        with mock.patch('time.perf_counter',
+                        mock.Mock(side_effect=[2.4, 3.8] * 10)):
+            with mock.patch('cupy.cuda.get_elapsed_time',
+                            mock.Mock(return_value=2500)):
+                with mock.patch('cupyx.time._PerfCaseResult') as m:
+                    x = cupy.array([1, 2, 3])
+                    y = cupy.array([1, 2, 3])
+                    with cupyx.measure('test_name_xxx', show_gpu=True):
+                        x + y
+                    m.asseert_called_once()
+                    name, ts = m.call_args[0]
+                    assert name == 'test_name_xxx'
+                    assert ts.shape == (2, 1)
+                    assert (ts[0] == 1.4).all()
+                    assert (ts[1] == 2.5).all()
+
+
 class TestPerfCaseResult(unittest.TestCase):
     def test_show_gpu(self):
         times = numpy.array([
