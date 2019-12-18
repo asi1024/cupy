@@ -17,7 +17,6 @@ from cupy.cuda cimport device
 from cupy.cuda cimport function
 from cupy.core cimport _scalar
 from cupy.core._dtype cimport get_dtype
-from cupy.core._routines_manipulation cimport _broadcast_core
 from cupy.core._scalar import get_typename as _get_typename
 from cupy.core.core cimport _convert_object_with_cuda_array_interface
 from cupy.core.core cimport compile_with_cache
@@ -72,7 +71,16 @@ cdef inline int get_kind_score(int kind):
     return -1
 
 
-cpdef list _preprocess_args(int dev_id, args, bint use_c_scalar):
+@cython.profile(False)
+cdef inline _check_array_device_id(ndarray arr, int device_id):
+    if arr.data.device_id != device_id:
+        raise ValueError(
+            'Array device must be same as the current '
+            'device: array device = %d while current = %d'
+            % (arr.data.device_id, device_id))
+
+
+cdef list _preprocess_args(int dev_id, args, bint use_c_scalar):
     """Preprocesses arguments for kernel invocation
 
     - Checks device compatibility for ndarrays
@@ -90,12 +98,7 @@ cpdef list _preprocess_args(int dev_id, args, bint use_c_scalar):
                 raise TypeError('Unsupported type %s' % type(arg))
             arg = _convert_object_with_cuda_array_interface(arg)
 
-        arr_dev_id = (<ndarray>arg).data.device_id
-        if arr_dev_id != dev_id:
-            raise ValueError(
-                'Array device must be same as the current '
-                'device: array device = %d while current = %d'
-                % (arr_dev_id, dev_id))
+        _check_array_device_id(<ndarray>arg, dev_id)
         ret.append(arg)
 
     return ret
@@ -136,7 +139,7 @@ cpdef str _get_kernel_params(tuple params, tuple args_info):
     return ', '.join(ret)
 
 
-cpdef tuple _reduce_dims(list args, tuple params, tuple shape):
+cdef tuple _reduce_dims(list args, tuple params, tuple shape):
     """ Remove contiguous stride to optimize CUDA kernel."""
     cdef ndarray arr
 
@@ -233,12 +236,6 @@ cdef tuple _reduced_view_core(list args, tuple params, tuple shape):
 
 
 cdef class ParameterInfo:
-    cdef:
-        readonly str name
-        readonly object dtype
-        readonly str ctype
-        readonly bint raw
-        readonly bint is_const
 
     def __init__(self, str param, bint is_const):
         self.name = None
@@ -270,9 +267,19 @@ cdef class ParameterInfo:
             else:
                 raise Exception('Unknown keyword "%s"' % i)
 
+    def __repr__(self):
+        return '<ParameterInfo({})>'.format(
+            ' '.join([
+                'name={!r}'.format(self.name),
+                'dtype={!r}'.format(self.dtype),
+                'ctype={!r}'.format(self.ctype),
+                'raw={!r}'.format(self.raw),
+                'is_const={!r}'.format(self.is_const),
+            ]))
+
 
 @util.memoize()
-def _get_param_info(s, is_const):
+def _get_param_info(str s, is_const):
     if len(s) == 0:
         return ()
     return tuple([ParameterInfo(i, is_const) for i in s.strip().split(',')])
@@ -358,11 +365,21 @@ cdef tuple _broadcast(list args, tuple params, bint use_size):
     else:
         if not is_not_none:
             raise ValueError('Loop size is Undecided')
-    _broadcast_core(value, shape)
+    internal._broadcast_core(value, shape)
     for i, a in enumerate(value):
         if a is None:
             value[i] = args[i]
     return value, tuple(shape)
+
+
+cdef _numpy_can_cast = numpy.can_cast
+
+
+cdef bint _can_cast(d1, d2, casting):
+    # most ufunc passes `same_kind`
+    if casting == 'same_kind' and get_dtype(d1).kind == d2.kind:
+        return True
+    return _numpy_can_cast(d1, d2, casting=casting)
 
 
 cdef list _get_out_args(list out_args, tuple out_types, tuple out_shape,
@@ -377,7 +394,7 @@ cdef list _get_out_args(list out_args, tuple out_types, tuple out_shape,
         if a.shape != out_shape:
             raise ValueError('Out shape is mismatched')
         out_type = out_types[i]
-        if not numpy.can_cast(out_type, a.dtype, casting=casting):
+        if not _can_cast(out_type, a.dtype, casting):
             msg = 'output (typecode \'{}\') could not be coerced to ' \
                   'provided output parameter (typecode \'{}\') according to ' \
                   'the casting rule "{}"'.format(
@@ -388,20 +405,17 @@ cdef list _get_out_args(list out_args, tuple out_types, tuple out_shape,
     return out_args
 
 
-cdef list _copy_in_args_if_needed(list in_args, list out_args):
-    cdef int i, j
-    cdef list ret = []
-
+cdef _copy_in_args_if_needed(list in_args, list out_args):
+    # This function updates `in_args`
+    cdef ndarray inp, out
     for i in range(len(in_args)):
-        inp = in_args[i]
-        if isinstance(inp, ndarray):
-            for j in range(len(out_args)):
-                out = out_args[j]
+        a = in_args[i]
+        if isinstance(a, ndarray):
+            inp = a
+            for out in out_args:
                 if inp is not out and may_share_bounds(inp, out):
-                    inp = inp.copy()
+                    in_args[i] = inp.copy()
                     break
-        ret.append(inp)
-    return ret
 
 
 cdef list _get_out_args_with_params(
@@ -697,7 +711,12 @@ cdef tuple _guess_routine_from_in_types(list ops, tuple in_types):
     for op in ops:
         op_types = op[0]
         for i in range(n):
-            if not can_cast(in_types[i], op_types[i]):
+            it = in_types[i]
+            ot = op_types[i]
+            if isinstance(it, tuple):
+                if not can_cast(it[0], ot) and not can_cast(it[1], ot):
+                    break
+            elif not can_cast(it, ot):
                 break
         else:
             return op
@@ -734,28 +753,46 @@ cdef inline bint _check_should_use_min_scalar(list in_args) except? -1:
             max_array_kind >= max_scalar_kind)
 
 
-cdef tuple _guess_routine(name, dict cache, list ops, list in_args, dtype):
+cdef dict _mst_unsigned_to_signed = {
+    i: (numpy.iinfo(j).max, (i, j))
+    for i, j in [(numpy.dtype(i).type, numpy.dtype(i.lower()).type)
+                 for i in "BHILQ"]}
+cdef _numpy_min_scalar_type = numpy.min_scalar_type
+
+cdef _min_scalar_type(x):
+    # A non-negative integer may have two locally minimum scalar
+    # types: signed/unsigned integer.
+    # Return both for can_cast, while numpy.min_scalar_type only returns
+    # the unsigned type.
+    t = _numpy_min_scalar_type(x)
+    dt = t.type
+    if t.kind == 'u':
+        m, dt2 = <tuple>_mst_unsigned_to_signed[dt]
+        if x <= m:
+            return dt2
+    return dt
+
+
+cdef tuple _guess_routine(str name, dict cache, list ops, list in_args, dtype):
     if dtype is None:
         use_raw_value = _check_should_use_min_scalar(in_args)
         if use_raw_value:
-            in_types = tuple([i.dtype if isinstance(i, ndarray) else i
-                              for i in in_args])
-            op = ()
+            in_types = tuple([
+                i.dtype.type if isinstance(i, ndarray) else _min_scalar_type(i)
+                for i in in_args])
         else:
             in_types = tuple([i.dtype.type for i in in_args])
-            op = cache.get(in_types, ())
-
+        op = cache.get(in_types, ())
         if op is ():
             op = _guess_routine_from_in_types(ops, in_types)
-            if not use_raw_value:
-                cache[in_types] = op
+            cache[in_types] = op
     else:
         op = cache.get(dtype, ())
         if op is ():
             op = _guess_routine_from_dtype(ops, dtype)
             cache[dtype] = op
 
-    if op:
+    if op is not None:
         return op
     if dtype is None:
         dtype = tuple([i.dtype.type for i in in_args])
@@ -888,9 +925,9 @@ cdef class ufunc:
             out_args = _preprocess_args(dev_id, (out,), False)
             args += out_args
 
-        in_args = _copy_in_args_if_needed(in_args, out_args)
+        _copy_in_args_if_needed(in_args, out_args)
         broad_values = in_args + out_args
-        _broadcast_core(broad_values, vec_shape)
+        internal._broadcast_core(broad_values, vec_shape)
         shape = tuple(vec_shape)
 
         op = _guess_routine(
@@ -969,5 +1006,3 @@ cpdef create_ufunc(name, ops, routine=None, preamble='', doc='',
     ret = ufunc(name, len(_ops[0][0]), len(_ops[0][1]), _ops, preamble,
                 loop_prep, doc, default_casting=default_casting)
     return ret
-
-include 'reduction.pxi'

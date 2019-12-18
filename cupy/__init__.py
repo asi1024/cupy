@@ -6,7 +6,12 @@ import warnings
 import numpy
 import six
 
+from cupy import _environment
 from cupy import _version
+
+
+if sys.platform.startswith('win32') and (3, 8) <= sys.version_info:  # NOQA
+    _environment._setup_win32_dll_directory()  # NOQA
 
 
 try:
@@ -690,7 +695,7 @@ from cupy.util import memoize  # NOQA
 from cupy.core import ElementwiseKernel  # NOQA
 from cupy.core import RawKernel  # NOQA
 from cupy.core import RawModule  # NOQA
-from cupy.core import ReductionKernel  # NOQA
+from cupy.core._reduction import ReductionKernel  # NOQA
 
 # -----------------------------------------------------------------------------
 # DLPack
