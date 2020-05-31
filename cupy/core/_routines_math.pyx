@@ -91,12 +91,12 @@ cdef ndarray _ndarray_prod(ndarray self, axis, dtype, out, keepdims):
 
 
 cdef ndarray _ndarray_sum(ndarray self, axis, dtype, out, keepdims):
-    if cupy.cuda.cub_enabled:
-        # result will be None if the reduction is not compatible with CUB
-        result = cub.cub_reduction(self, cub.CUPY_CUB_SUM, axis, dtype, out,
-                                   keepdims)
-        if result is not None:
-            return result
+    # if cupy.cuda.cub_enabled:
+    #     # result will be None if the reduction is not compatible with CUB
+    #     result = cub.cub_reduction(self, cub.CUPY_CUB_SUM, axis, dtype, out,
+    #                                keepdims)
+    #     if result is not None:
+    #         return result
     if dtype is None:
         return _sum_auto_dtype(self, axis, dtype, out, keepdims)
     else:
@@ -548,7 +548,8 @@ _sum_auto_dtype = create_reduction_func(
      'q->q', 'Q->Q',
      ('e->e', (None, None, None, 'float')),
      'f->f', 'd->d', 'F->F', 'D->D'),
-    ('in0', 'a + b', 'out0 = type_out0_raw(a)', None), 0)
+    ('in0', 'a + b', 'out0 = type_out0_raw(a)', None), 0,
+    cub_op=cub.CUPY_CUB_SUM)
 
 
 _sum_keep_dtype = create_reduction_func(
@@ -557,7 +558,8 @@ _sum_keep_dtype = create_reduction_func(
      'q->q', 'Q->Q',
      ('e->e', (None, None, None, 'float')),
      'f->f', 'd->d', 'F->F', 'D->D'),
-    ('in0', 'a + b', 'out0 = type_out0_raw(a)', None), 0)
+    ('in0', 'a + b', 'out0 = type_out0_raw(a)', None), 0,
+    cub_op=cub.CUPY_CUB_SUM)
 
 
 _nansum_auto_dtype = create_reduction_func(

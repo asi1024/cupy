@@ -36,8 +36,12 @@ import numpy
 from cupy.core._kernel import _get_param_info
 from cupy.core._kernel import _decide_params_type
 from cupy.core._ufuncs import elementwise_copy
+from cupy import cuda
 from cupy.cuda import compiler
 from cupy import util
+
+if cuda.cub_enabled:
+    from cupy.cuda import cub
 
 
 cpdef function.Function _create_reduction_function(
@@ -243,6 +247,7 @@ cdef class _AbstractReductionKernel:
         self.in_params = in_params_
         self.out_params = out_params_
         self._params = params
+        self._cub_op = None
 
     cpdef ndarray _call(
             self,
@@ -289,6 +294,12 @@ cdef class _AbstractReductionKernel:
         if self.identity == '' and internal.is_in(a_shape, 0):
             raise ValueError(('zero-size array to reduction operation'
                               ' %s which has no identity') % self.name)
+
+        if cuda.cub_enabled:
+            res = cub.cub_reduction(
+                in_args, self._cub_op, reduce_type, ret, keepdims)
+            if res is not None:
+                return res
 
         in_args = [x if isinstance(x, ndarray) else
                    _scalar.CScalar.from_numpy_scalar_with_dtype(x, t)
@@ -456,9 +467,9 @@ cdef class _AbstractReductionKernel:
 # -----------------------------------------------------------------------------
 
 cpdef _SimpleReductionKernel create_reduction_func(
-        name, ops, routine=None, identity=None, preamble=''):
+        name, ops, routine=None, identity=None, preamble='', cub_op=None):
     ops = _kernel._Ops.from_tuples(ops, routine)
-    return _SimpleReductionKernel(name, ops, identity, preamble)
+    return _SimpleReductionKernel(name, ops, identity, preamble, cub_op)
 
 
 cdef class _SimpleReductionKernel(_AbstractReductionKernel):
@@ -472,7 +483,8 @@ cdef class _SimpleReductionKernel(_AbstractReductionKernel):
         readonly str _output_expr
         readonly dict _routine_cache
 
-    def __init__(self, name, _kernel._Ops ops, identity, preamble):
+    def __init__(
+            self, name, _kernel._Ops ops, identity, preamble, cub_op):
         super().__init__(
             name,
             '' if identity is None else str(identity),
@@ -486,6 +498,7 @@ cdef class _SimpleReductionKernel(_AbstractReductionKernel):
         self._input_expr = 'const type_in0_raw in0 = _raw_in0[_in_ind.get()];'
         self._output_expr = 'type_out0_raw &out0 = _raw_out0[_out_ind.get()];'
         self._routine_cache = {}
+        self._cub_op = cub_op
 
     def __call__(self, object a, axis=None, dtype=None, ndarray out=None,
                  bint keepdims=False):
