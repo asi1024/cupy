@@ -30,6 +30,7 @@ from cupy import util
 cimport cpython  # NOQA
 cimport cython  # NOQA
 from libcpp cimport vector
+from libc.stdint cimport int64_t
 
 from cupy.core cimport _carray
 from cupy.core cimport _dtype
@@ -134,16 +135,19 @@ cdef class ndarray:
         # data
         if memptr is None:
             self.data = memory.alloc(self.size * itemsize)
+            self._index_32_bits = (self.size * itemsize) <= (1 << 31)
         else:
             self.data = memptr
+            bound = cupy.core._memory_range.get_bound(self)
+            self._index_32_bits = bound[1] - bound[0] <= (1 << 31)
 
-    cdef _init_fast(self, const vector.vector[Py_ssize_t]& shape, dtype,
-                    bint c_order):
+    cdef _init_fast(self, const shape_t& shape, dtype, bint c_order):
         """ For internal ndarray creation. """
         self._shape = shape
         self.dtype, itemsize = _dtype.get_dtype_with_itemsize(dtype)
         self._set_contiguous_strides(itemsize, c_order)
         self.data = memory.alloc(self.size * itemsize)
+        self._index_32_bits = (self.size * itemsize) <= (1 << 31)
 
     @property
     def __cuda_array_interface__(self):
@@ -319,7 +323,7 @@ cdef class ndarray:
     cpdef tofile(self, fid, sep='', format='%s'):
         """Writes the array to a file.
 
-        .. seealso:: :meth:`numpy.ndarray.tolist`
+        .. seealso:: :meth:`numpy.ndarray.tofile`
 
         """
         self.get().tofile(fid, sep, format)
@@ -364,7 +368,7 @@ cdef class ndarray:
         .. seealso:: :meth:`numpy.ndarray.astype`
 
         """
-        cdef vector.vector[Py_ssize_t] strides
+        cdef strides_t strides
         cdef Py_ssize_t stride
 
         # TODO(beam2d): Support casting and subok option
@@ -1161,10 +1165,12 @@ cdef class ndarray:
     # cupy.ndarray does not define __new__
 
     def __array__(self, dtype=None):
-        if dtype is None or self.dtype == dtype:
-            return self
-        else:
-            return self.astype(dtype)
+        # TODO(imanishi): Support an environment variable or a global
+        # configure flag that allows implicit conversions to NumPy array.
+        # (See https://github.com/cupy/cupy/issues/589 for the detail.)
+        raise TypeError(
+            'Implicit conversion to a NumPy array is not allowed. '
+            'Please use `.get()` to construct a NumPy array explicitly.')
 
     # TODO(okuta): Implement __array_wrap__
 
@@ -1546,7 +1552,8 @@ cdef class ndarray:
             cupy.ndarray: A view of the array with reduced dimensions.
 
         """
-        cdef vector.vector[Py_ssize_t] shape, strides
+        cdef shape_t shape
+        cdef strides_t strides
         cdef Py_ssize_t ndim
         cdef ndarray view
         if dtype is not None:
@@ -1582,7 +1589,8 @@ cdef class ndarray:
 
     cpdef _update_f_contiguity(self):
         cdef Py_ssize_t i, count
-        cdef vector.vector[Py_ssize_t] rev_shape, rev_strides
+        cdef shape_t rev_shape
+        cdef strides_t rev_strides
         if self.size == 0:
             self._f_contiguous = True
             return
@@ -1602,8 +1610,8 @@ cdef class ndarray:
         self._update_c_contiguity()
         self._update_f_contiguity()
 
-    cpdef _set_shape_and_strides(self, const vector.vector[Py_ssize_t]& shape,
-                                 const vector.vector[Py_ssize_t]& strides,
+    cpdef _set_shape_and_strides(self, const shape_t& shape,
+                                 const strides_t& strides,
                                  bint update_c_contiguity,
                                  bint update_f_contiguity):
         if shape.size() != strides.size():
@@ -1616,8 +1624,8 @@ cdef class ndarray:
         if update_f_contiguity:
             self._update_f_contiguity()
 
-    cdef ndarray _view(self, const vector.vector[Py_ssize_t]& shape,
-                       const vector.vector[Py_ssize_t]& strides,
+    cdef ndarray _view(self, const shape_t& shape,
+                       const strides_t& strides,
                        bint update_c_contiguity,
                        bint update_f_contiguity):
         cdef ndarray v
@@ -1627,6 +1635,7 @@ cdef class ndarray:
         v.dtype = self.dtype
         v._c_contiguous = self._c_contiguous
         v._f_contiguous = self._f_contiguous
+        v._index_32_bits = self._index_32_bits
         v._set_shape_and_strides(
             shape, strides, update_c_contiguity, update_f_contiguity)
         return v
@@ -1703,9 +1712,8 @@ cpdef int _update_order_char(ndarray x, int order_char):
     return order_char
 
 
-cpdef vector.vector[Py_ssize_t] _get_strides_for_order_K(ndarray x, dtype,
-                                                         shape=None):
-    cdef vector.vector[Py_ssize_t] strides
+cpdef strides_t _get_strides_for_order_K(ndarray x, dtype, shape=None):
+    cdef strides_t strides
     # strides used when order='K' for astype, empty_like, etc.
     stride_and_index = [
         (abs(s), -i) for i, s in enumerate(x.strides)]
@@ -1804,7 +1812,7 @@ cdef inline str _translate_cucomplex_to_thrust(str source):
 cpdef function.Module compile_with_cache(
         str source, tuple options=(), arch=None, cachd_dir=None,
         prepend_cupy_headers=True, backend='nvrtc', translate_cucomplex=False,
-        enable_cooperative_groups=False):
+        enable_cooperative_groups=False, name_expressions=None):
     if translate_cucomplex:
         source = _translate_cucomplex_to_thrust(source)
         _cupy_header_list.append('cupy/cuComplex_bridge.h')
@@ -1830,6 +1838,8 @@ cpdef function.Module compile_with_cache(
             bundled_include = 'cuda-10.1'
         elif 10020 <= _cuda_runtime_version < 10030:
             bundled_include = 'cuda-10.2'
+        elif 11000 <= _cuda_runtime_version < 11010:
+            bundled_include = 'cuda-11.0'
         else:
             # CUDA v9.0, v9.1 or versions not yet supported.
             bundled_include = None
@@ -1852,7 +1862,8 @@ cpdef function.Module compile_with_cache(
 
     return cuda.compile_with_cache(
         source, options, arch, cachd_dir, extra_source, backend,
-        enable_cooperative_groups=enable_cooperative_groups)
+        enable_cooperative_groups=enable_cooperative_groups,
+        name_expressions=name_expressions)
 
 
 # =============================================================================
@@ -1902,17 +1913,19 @@ template<typename T> __device__ T pow10(long long n){
 
 cdef _round_float = '''
 if (in1 == 0) {
-    out0 = round(in0);
+    out0 = rint(in0);
 } else {
     double x;
     x = pow10<double>(abs(in1));  // TODO(okuta): Move before loop
-    out0 = in1 < 0 ? round(in0 / x) * x : round(in0 * x) / x;
+    out0 = in1 < 0 ? rint(in0 / x) * x : rint(in0 * x) / x;
 }'''
 
 cdef _round_complex = '''
 double x, inv_x;
 if (in1 == 0) {
     x = inv_x = 1;
+    out0 = in0_type(rint(in0.real() * x),
+                    rint(in0.imag() * x));
 } else {
     x = pow10<double>(abs(in1));  // TODO(okuta): Move before loop
     inv_x = 1.0 / x;
@@ -1921,11 +1934,21 @@ if (in1 == 0) {
         x = inv_x;
         inv_x = y;
     }
-}
-out0 = in0_type(round(in0.real() * x) * inv_x,
-                round(in0.imag() * x) * inv_x);'''
+    out0 = in0_type(rint(in0.real() * x) * inv_x,
+                    rint(in0.imag() * x) * inv_x);
+}'''
 
 
+# There is a known incompatibility with NumPy (as of 1.16.4) such as
+# `numpy.around(2**63, -1) == cupy.around(2**63, -1)` gives `False`.
+#
+# NumPy seems to round integral values via double.  As double has
+# only 53 bit precision, last few bits of (u)int64 value may be lost.
+# As a consequence, `numpy.around(2**63, -1)` does NOT round up the
+# last digit (9223372036854775808 instead of ...810).
+#
+# The following code fixes the problem, so `cupy.around(2**63, -1)`
+# gives `...810`, which (may correct but) is incompatible with NumPy.
 _round_ufunc = create_ufunc(
     'cupy_round',
     ('?q->e',
@@ -1937,13 +1960,21 @@ _round_ufunc = create_ufunc(
      ('Fq->F', _round_complex),
      ('Dq->D', _round_complex)),
     '''
-    if (in1 < 0) {
+    if (in1 >= 0) {
+        out0 = in0;
+    } else {
         // TODO(okuta): Move before loop
         long long x = pow10<long long>(-in1 - 1);
+
         // TODO(okuta): Check Numpy
-        out0 = ((in0 / x + (in0 > 0 ? 5 : -5)) / 10) * x * 10;
-    } else {
-        out0 = in0;
+        // `cupy.around(-123456789, -4)` works as follows:
+        // (1) scale by `x` above: -123456.789
+        // (2) split at the last 2 digits: -123400 + (-5.6789 * 10)
+        // (3) round the latter by `rint()`: -123400 + (-6.0 * 10)
+        // (4) unscale by `x` above: -123460000
+        long long q = in0 / x / 100;
+        int r = in0 - q*x*100;
+        out0 = (q*100 + __float2ll_rn(r/(x*10.0f))*10) * x;
     }''', preamble=_round_preamble)
 
 
@@ -2102,7 +2133,7 @@ cdef ndarray _send_object_to_gpu(obj, dtype, order, Py_ssize_t ndmin):
     a_dtype = a_cpu.dtype  # converted to numpy.dtype
     if a_dtype.char not in '?bhilqBHILQefdFD':
         raise ValueError('Unsupported dtype %s' % a_dtype)
-    cdef vector.vector[Py_ssize_t] a_shape = a_cpu.shape
+    cdef shape_t a_shape = a_cpu.shape
     cdef ndarray a = ndarray(a_shape, dtype=a_dtype, order=order)
     if a_cpu.ndim == 0:
         a.fill(a_cpu)
@@ -2127,7 +2158,7 @@ cdef ndarray _send_object_to_gpu(obj, dtype, order, Py_ssize_t ndmin):
 
 cdef ndarray _send_numpy_array_list_to_gpu(
         list arrays, src_dtype, dst_dtype,
-        const vector.vector[Py_ssize_t]& shape,
+        const shape_t& shape,
         order, Py_ssize_t ndmin):
 
     a_dtype = get_dtype(dst_dtype)  # convert to numpy.dtype
@@ -2378,8 +2409,7 @@ right_shift = _create_bit_op(
 cpdef ndarray dot(ndarray a, ndarray b, ndarray out=None):
     cdef Py_ssize_t a_ndim, b_ndim, a_axis, b_axis, n, m, k
     cdef bint input_a_is_vec, input_b_is_vec
-    cdef vector.vector[Py_ssize_t] ret_shape
-    cdef vector.vector[Py_ssize_t] shape
+    cdef shape_t ret_shape, shape
 
     a_ndim = a._shape.size()
     b_ndim = b._shape.size()
@@ -2735,8 +2765,8 @@ cdef _tensordot_core_mul_sum = ReductionKernel(
 
 cpdef ndarray tensordot_core(
         ndarray a, ndarray b, ndarray out, Py_ssize_t n, Py_ssize_t m,
-        Py_ssize_t k, const vector.vector[Py_ssize_t]& ret_shape):
-    cdef vector.vector[Py_ssize_t] shape
+        Py_ssize_t k, const shape_t& ret_shape):
+    cdef shape_t shape
     cdef Py_ssize_t inca, incb, transa, transb, lda, ldb
     cdef Py_ssize_t mode, handle
     cdef bint use_sgemmEx
@@ -2987,7 +3017,21 @@ cpdef ndarray _convert_object_with_cuda_array_interface(a):
     return ndarray(shape, dtype, memptr, strides)
 
 
-cdef ndarray _ndarray_init(const vector.vector[Py_ssize_t]& shape, dtype):
+cdef ndarray _ndarray_init(const shape_t& shape, dtype):
     cdef ndarray ret = ndarray.__new__(ndarray)
     ret._init_fast(shape, dtype, True)
     return ret
+
+
+cdef ndarray _create_ndarray_from_shape_strides(
+        const shape_t& shape, const strides_t& strides, dtype):
+    cdef int ndim = shape.size()
+    cdef int64_t begin = 0, end = dtype.itemsize
+    cdef memory.MemoryPointer ptr
+    for i in range(ndim):
+        if strides[i] > 0:
+            end += strides[i] * (shape[i] - 1)
+        elif strides[i] < 0:
+            begin += strides[i] * (shape[i] - 1)
+    ptr = memory.alloc(end - begin) + begin
+    return ndarray(shape, dtype, memptr=ptr, strides=strides)

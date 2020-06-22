@@ -41,9 +41,11 @@ MODULES = []
 
 cuda_files = [
     'cupy.core._carray',
+    'cupy.core._cub_reduction',
     'cupy.core._dtype',
     'cupy.core._kernel',
     'cupy.core._memory_range',
+    'cupy.core._optimize_config',
     'cupy.core._reduction',
     'cupy.core._routines_indexing',
     'cupy.core._routines_logic',
@@ -762,7 +764,8 @@ def _nvcc_gencode_options(cuda_version):
 
     envcfg = os.getenv('CUPY_NVCC_GENERATE_CODE', None)
     if envcfg:
-        return ['--generate-code={}'.format(envcfg)]
+        return ['--generate-code={}'.format(arch)
+                for arch in envcfg.split(';') if len(arch) > 0]
 
     # The arch_list specifies virtual architectures, such as 'compute_61', and
     # real architectures, such as 'sm_61', for which the CUDA input files are
@@ -794,7 +797,14 @@ def _nvcc_gencode_options(cuda_version):
     arch_list = ['compute_30',
                  'compute_50']
 
-    if cuda_version >= 10000:
+    if cuda_version >= 11000:
+        arch_list += [('compute_60', 'sm_60'),
+                      ('compute_61', 'sm_61'),
+                      ('compute_70', 'sm_70'),
+                      ('compute_75', 'sm_75'),
+                      ('compute_80', 'sm_80'),
+                      'compute_80']
+    elif cuda_version >= 10000:
         arch_list += [('compute_60', 'sm_60'),
                       ('compute_61', 'sm_61'),
                       ('compute_70', 'sm_70'),

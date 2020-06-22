@@ -7,11 +7,12 @@ import warnings
 
 import numpy
 
+from cupy.core._carray cimport shape_t
 from cupy.core cimport _routines_manipulation as _manipulation
 from cupy.core cimport core
+from cupy.core cimport internal
 from cupy.cuda cimport cudnn
 from cupy.cuda cimport device
-from cupy.core cimport internal
 from cupy.cuda cimport memory
 
 from cupy.core._ufuncs import elementwise_copy
@@ -1379,7 +1380,7 @@ cpdef _Algorithm _get_algorithm_fwd(
         return algo
     cdef list ret
     cdef bint skip
-    if use_tensor_core and _cudnn_version >= 7000:
+    if (use_tensor_core and _cudnn_version >= 7000) or _cudnn_version >= 8000:
         ret = cudnn.getConvolutionForwardAlgorithm_v7(
             handle, x_desc, filter_desc, conv_desc, y_desc, 10)
         skip = False
@@ -1685,7 +1686,7 @@ def convolution_forward(
     cdef size_t conv_desc = cudnn.createConvolutionDescriptor()
 
     cdef size_t max_workspace_size = get_max_workspace_size()
-    cdef vector.vector[Py_ssize_t] b_shape
+    cdef shape_t b_shape
     cdef _Algorithm perf
     try:
         _create_tensor_descriptor(x_desc, x, format=d_layout)
@@ -1889,7 +1890,7 @@ def convolution_backward_data(
     cdef int algo
     cdef size_t max_workspace_size = get_max_workspace_size()
     cdef size_t workspace_size = 0
-    cdef vector.vector[Py_ssize_t] b_shape
+    cdef shape_t b_shape
     try:
         _create_tensor_descriptor(x_desc, x, format=d_layout)
         _create_tensor_descriptor(y_desc, y, format=d_layout)
