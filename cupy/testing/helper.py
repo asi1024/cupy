@@ -268,6 +268,10 @@ def _convert_output_to_ndarray(c_out, n_out, sp_name):
             and isinstance(n_out, (numpy.ndarray, numpy.generic))):
         # ndarray output case.
         return c_out, n_out
+    if isinstance(c_out, cupy.poly1d) and isinstance(n_out, numpy.poly1d):
+        # ndarray output case.
+        assert c_out.variable == n_out.variable
+        return c_out.coeffs, n_out.coeffs
     if isinstance(c_out, numpy.generic) and isinstance(n_out, numpy.generic):
         # scalar output case.
         return c_out, n_out
