@@ -9,3 +9,4 @@ Functional programming
 
    cupy.apply_along_axis
    cupy.piecewise
+   cupy.vectorize
