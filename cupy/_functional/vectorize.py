@@ -30,7 +30,7 @@ class vectorize(object):
             otypes (str or list of dtypes, optional): The output data type.
             doc (str or None): The docstring for the function.
             excluded: Currently not supported.
-            cache: Currently Ignored.
+            cache: Currently ignored.
             signature: Currently not supported.
         """
 
