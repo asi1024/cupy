@@ -164,6 +164,14 @@ public:
     return float16(ret_raw_);
   }
 
+  friend __device__ float16 copysignf(float16 x, float16 y) {
+    return copysign(x, y);
+  }
+
+  friend __device__ float16 nextafterf(float16 x, float16 y) {
+    return nextafter(x, y);
+  }
+
 private:
   static __device__ int eq_nonan(const float16 x, const float16 y) {
     __half_raw x_raw_ = __half_raw(x.data_);
