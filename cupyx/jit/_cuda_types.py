@@ -13,6 +13,8 @@ if TYPE_CHECKING:
 # Base class for cuda types.
 class TypeBase:
 
+    property_methods = []
+
     def __str__(self) -> str:
         raise NotImplementedError
 
@@ -65,13 +67,21 @@ class PtrDiff(Scalar):
 
 class ArrayBase(TypeBase):
 
+    property_methods = ['ndim']
+
+    def ndim(self, code):
+        from cupyx.jit import _internal_types  # avoid circular import
+        return _internal_types.Constant(self._ndim)
+
     def __init__(self, child_type: TypeBase, ndim: int) -> None:
         assert isinstance(child_type, TypeBase)
         self.child_type = child_type
-        self.ndim = ndim
+        self._ndim = ndim
 
 
 class CArray(ArrayBase):
+
+    property_methods = ['ndim', 'size', 'shape', 'strides']
 
     def __init__(
             self,
@@ -89,25 +99,41 @@ class CArray(ArrayBase):
     def from_ndarray(cls, x: cupy.ndarray) -> 'CArray':
         return CArray(x.dtype, x.ndim, x._c_contiguous, x._index_32_bits)
 
+    def size(self, code) -> 'Data':
+        from cupyx.jit import _internal_types  # avoid circular import
+        return _internal_types.Data(
+            f'static_cast<long long>({code}.size())', Scalar('q'))
+
+    def shape(self, code) -> 'Data':
+        from cupyx.jit import _internal_types  # avoid circular import
+        if self._ndim > 10:
+            raise NotImplementedError(
+                'getting shape/strides for an array with ndim > 10 '
+                'is not supported yet')
+        return _internal_types.Data(
+            f'{code}.get_shape()', Tuple([PtrDiff()] * self._ndim))
+
+    def strides(self, code) -> 'Data':
+        from cupyx.jit import _internal_types  # avoid circular import
+        if self._ndim > 10:
+            raise NotImplementedError(
+                'getting shape/strides for an array with ndim > 10 '
+                'is not supported yet')
+        return _internal_types.Data(
+            f'{code}.get_strides()', Tuple([PtrDiff()] * self._ndim))
+
     def __str__(self) -> str:
         ctype = get_typename(self.dtype)
+        ndim = self._ndim
         c_contiguous = get_cuda_code_from_constant(self._c_contiguous, bool_)
         index_32_bits = get_cuda_code_from_constant(self._index_32_bits, bool_)
-        return f'CArray<{ctype}, {self.ndim}, {c_contiguous}, {index_32_bits}>'
+        return f'CArray<{ctype}, {ndim}, {c_contiguous}, {index_32_bits}>'
 
     def __eq__(self, other: object) -> bool:
-        assert isinstance(other, TypeBase)
-        return (
-            isinstance(other, CArray) and
-            self.dtype == other.dtype and
-            self.ndim == other.ndim and
-            self._c_contiguous == other._c_contiguous and
-            self._index_32_bits == other._index_32_bits
-        )
+        return str(self) == str(other)
 
     def __hash__(self) -> int:
-        return hash(
-            (self.dtype, self.ndim, self._c_contiguous, self._index_32_bits))
+        return hash(str(self))
 
 
 class SharedMem(ArrayBase):
@@ -178,6 +204,8 @@ class Dim3(TypeBase):
         y (uint32)
         z (uint32)
     """
+
+    property_methods = ['x', 'y', 'z']
 
     def x(self, code: str) -> 'Data':
         from cupyx.jit import _internal_types  # avoid circular import

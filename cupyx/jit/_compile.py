@@ -6,6 +6,7 @@ import numbers
 import re
 import sys
 from typing import Any, Dict, List, Optional, Sequence, Tuple, TypeVar, Union
+import types
 import warnings
 
 import numpy
@@ -16,7 +17,6 @@ from cupyx import jit
 from cupyx.jit import _cuda_types
 from cupyx.jit import _cuda_typerules
 from cupyx.jit import _internal_types
-from cupyx.jit.cg import _ThreadGroup
 from cupyx.jit._internal_types import Data
 from cupyx.jit._internal_types import Constant
 from cupyx.jit import _builtin_funcs
@@ -751,33 +751,18 @@ def _transpile_expr_internal(
         return value
     if isinstance(expr, ast.Attribute):
         value = _transpile_expr(expr.value, env)
-        if is_constants(value):
+        if isinstance(value, Constant):
             return Constant(getattr(value.obj, expr.attr))
-        if isinstance(value.ctype, _cuda_types.ArrayBase):
-            if 'ndim' == expr.attr:
-                return Constant(value.ctype.ndim)
-        if isinstance(value.ctype, _cuda_types.CArray):
-            if 'size' == expr.attr:
-                return Data(f'static_cast<long long>({value.code}.size())',
-                            _cuda_types.Scalar('q'))
-            if expr.attr in ('shape', 'strides'):
-                # this guard is needed to avoid NVRTC from throwing an
-                # obsecure error
-                if value.ctype.ndim > 10:
-                    raise NotImplementedError(
-                        'getting shape/strides for an array with ndim > 10 '
-                        'is not supported yet')
-                types = [_cuda_types.PtrDiff()]*value.ctype.ndim
-                return Data(f'{value.code}.get_{expr.attr}()',
-                            _cuda_types.Tuple(types))
-        if isinstance(value.ctype, _cuda_types.Dim3):
-            if expr.attr in ('x', 'y', 'z'):
-                return getattr(value.ctype, expr.attr)(value.code)
-        # TODO(leofang): support arbitrary Python class methods
-        if isinstance(value.ctype, _ThreadGroup):
-            return _internal_types.BuiltinFunc.from_class_method(
-                value.code, getattr(value.ctype, expr.attr))
-        raise NotImplementedError('Not implemented: __getattr__')
+        if isinstance(value, _internal_types.BuiltinFunc):
+            return Constant(getattr(value, expr.attr))
+        if isinstance(value, Data) and hasattr(value.ctype, expr.attr):
+            attr = getattr(value.ctype, expr.attr, None)
+            if isinstance(attr, types.MethodType):
+                if expr.attr in value.ctype.property_methods:
+                    return attr(value.code)
+                return _internal_types.BuiltinFunc.from_class_method(
+                    value.code, attr)
+        raise AttributeError('Unknown attribute: {expr.attr}')
 
     if isinstance(expr, ast.Tuple):
         elts = [_transpile_expr(x, env) for x in expr.elts]
@@ -879,7 +864,7 @@ def _indexing(
 
     if isinstance(array.ctype, _cuda_types.ArrayBase):
         index = Data.init(index, env)
-        ndim = array.ctype.ndim
+        ndim = array.ctype._ndim
         if isinstance(index.ctype, _cuda_types.Scalar):
             index_dtype = index.ctype.dtype
             if ndim != 1:
