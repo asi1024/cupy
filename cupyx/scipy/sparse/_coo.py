@@ -506,6 +506,7 @@ class coo_matrix(sparse_data._data_matrix):
         # sum_duplicates and coosort change the underlying data
         x = self.copy()
         x.sum_duplicates()
+        x.eliminate_zeros()
         cusparse.coosort(x, 'c')
         x = cusparse.coo2csc(x)
         x.has_canonical_format = True
@@ -529,6 +530,7 @@ class coo_matrix(sparse_data._data_matrix):
         # sum_duplicates and coosort change the underlying data
         x = self.copy()
         x.sum_duplicates()
+        x.eliminate_zeros()
         cusparse.coosort(x, 'r')
         x = cusparse.coo2csr(x)
         x.has_canonical_format = True
