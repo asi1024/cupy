@@ -153,6 +153,14 @@ class csr_matrix(_compressed._compressed_sparse_matrix):
             self.sum_duplicates()
             other.sum_duplicates()
             if cusparse.check_availability('spgemm'):
+                print(">> self")
+                print(self.data)
+                print(self.indices)
+                print(self.indptr)
+                print(">> other")
+                print(other.data)
+                print(other.indices)
+                print(other.indptr)
                 return cusparse.spgemm(self, other)
             elif cusparse.check_availability('csrgemm2'):
                 return cusparse.csrgemm2(self, other)
